@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { createIvyLeafTexture } from './leafTexture';
+import { windSettings } from './wind';
 
 export type Quality = 'low' | 'high';
 
@@ -49,11 +50,22 @@ interface Stem {
 
 interface Leaf {
   pos: THREE.Vector3;
-  quat: THREE.Quaternion;
+  quat: THREE.Quaternion;  // rest orientation (x = hinge across the blade, y = blade, z = normal)
+  normal: THREE.Vector3;   // world-space blade normal at rest, for wind pressure
+  phase: number;           // per-leaf time offset so neighbours never move in sync
   scale: number;
   birth: number;
   color: THREE.Color;
 }
+
+// Scratch objects for the per-frame leaf pose pass (avoid allocating in the loop).
+const _m = new THREE.Matrix4();
+const _q = new THREE.Quaternion();
+const _qFlap = new THREE.Quaternion();
+const _qTwist = new THREE.Quaternion();
+const _s = new THREE.Vector3();
+const _X = new THREE.Vector3(1, 0, 0);
+const _Y = new THREE.Vector3(0, 1, 0);
 
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -220,8 +232,8 @@ export class IvyPlant {
   private stems: { mesh: THREE.Mesh; births: number[]; radial: number; vis: number }[] = [];
   private leaves: Leaf[] = [];
   private leafMesh: THREE.InstancedMesh | null = null;
-  private leafCount = 0;   // instances currently revealed
-  private leafSettled = 0; // instances already at final scale
+  private leafCount = 0;    // instances currently revealed
+  private restApplied = false; // matrices already written for still air + finished growth
   private progress = 0;
   private total = 0;
   private done = false;
@@ -243,7 +255,7 @@ export class IvyPlant {
     return this.done;
   }
 
-  /** Advance the growth animation. */
+  /** Advance the growth animation (stem reveal + leaf reveal; leaf poses are updateLeaves'). */
   update(dt: number): void {
     if (this.done) return;
     this.progress += dt * this.settings.growthSpeed;
@@ -257,29 +269,61 @@ export class IvyPlant {
     if (this.leafMesh) {
       while (this.leafCount < this.leaves.length && this.leaves[this.leafCount].birth <= p) this.leafCount++;
       this.leafMesh.count = this.leafCount;
+    }
 
-      const m = new THREE.Matrix4();
-      const sc = new THREE.Vector3();
-      let changed = false;
-      for (let i = this.leafSettled; i < this.leafCount; i++) {
-        const leaf = this.leaves[i];
-        let f = (p - leaf.birth) / LEAF_GROW_WINDOW;
-        if (f >= 1) {
-          f = 1;
-          if (i === this.leafSettled) this.leafSettled++;
-        }
-        const e = f * f * (3 - 2 * f);
-        const s = Math.max(leaf.scale * e, 1e-4);
-        m.compose(leaf.pos, leaf.quat, sc.set(s, s, s));
-        this.leafMesh.setMatrixAt(i, m);
-        changed = true;
+    if (p >= this.total + LEAF_GROW_WINDOW) this.done = true;
+  }
+
+  /**
+   * Per-frame leaf poses: growth scale-in combined with wind, called every frame with the
+   * elapsed time in seconds. Wind is a rigid rotation of each blade about its base — the
+   * instance origin IS the stem attachment point, so leaves can never detach — with:
+   *  - lean from wind pressure (dot of wind direction with the blade's rest normal),
+   *  - a gust wave travelling along the wind direction (leaves ripple in sequence),
+   *  - per-leaf detuned flutter,
+   *  - an asymmetric flap clamp: blades swing freely away from the host surface (+z of the
+   *    leaf frame) but barely toward it, so they never get pushed inside the mesh.
+   */
+  updateLeaves(t: number): void {
+    if (!this.leafMesh || this.leafCount === 0) return;
+    const w = windSettings;
+    const windy = w.strength > 0.001;
+    if (!windy && this.done && this.restApplied) return; // nothing can have changed
+
+    const speed = w.speed;
+    const rad = THREE.MathUtils.degToRad(w.directionDeg);
+    const dx = Math.cos(rad);
+    const dz = Math.sin(rad);
+
+    for (let i = 0; i < this.leafCount; i++) {
+      const leaf = this.leaves[i];
+      let f = (this.progress - leaf.birth) / LEAF_GROW_WINDOW;
+      if (f > 1) f = 1;
+      else if (f < 0) f = 0;
+      const e = f * f * (3 - 2 * f);
+      const s = Math.max(leaf.scale * e, 1e-4);
+
+      _q.copy(leaf.quat);
+      if (windy) {
+        // Gust wave travelling along the wind direction.
+        const wave = Math.sin(t * 1.1 * speed - (leaf.pos.x * dx + leaf.pos.z * dz) * 1.6 + leaf.phase * 0.2);
+        const gustFactor = 0.3 + 0.7 * (0.5 + 0.5 * wave) ** 2;
+        const strength = w.strength * gustFactor;
+
+        // Steady lean: pressure on the blade face. Edge-on blades get no lean, only flutter.
+        const press = dx * leaf.normal.x + dz * leaf.normal.z;
+        const flutter =
+          Math.sin(t * 4.6 * speed + leaf.phase) + 0.5 * Math.sin(t * 7.3 * speed + leaf.phase * 1.7);
+
+        const flap = THREE.MathUtils.clamp(press * strength * 0.9 + flutter * strength * 0.35, -0.18, 0.85);
+        const twist = Math.sin(t * 3.1 * speed + leaf.phase * 2.3) * strength * 0.3;
+        _q.multiply(_qFlap.setFromAxisAngle(_X, flap)).multiply(_qTwist.setFromAxisAngle(_Y, twist));
       }
-      if (changed) this.leafMesh.instanceMatrix.needsUpdate = true;
+      _m.compose(leaf.pos, _q, _s.set(s, s, s));
+      this.leafMesh.setMatrixAt(i, _m);
     }
-
-    if (p >= this.total && (!this.leafMesh || this.leafSettled === this.leaves.length)) {
-      this.done = true;
-    }
+    this.leafMesh.instanceMatrix.needsUpdate = true;
+    this.restApplied = !windy && this.done;
   }
 
   /** Jump straight to the fully-grown state (used when tweaking settings live). */
@@ -460,6 +504,8 @@ export class IvyPlant {
       this.leaves.push({
         pos: node.pos.clone().addScaledVector(node.normal, s.stemRadius * 0.4),
         quat,
+        normal: z.clone(),
+        phase: rnd() * Math.PI * 2,
         scale: s.leafSize * (0.55 + 0.75 * rnd()),
         birth: node.birth + 0.05,
         color,

@@ -310,7 +310,11 @@ export class App {
 
     this.controls.update();
     this.painter.update(dt);
-    for (const plant of this.plants) plant.update(dt);
+    const tSec = time / 1000;
+    for (const plant of this.plants) {
+      plant.update(dt);
+      plant.updateLeaves(tSec);
+    }
     this.renderer.render(this.scene, this.camera);
   }
 }

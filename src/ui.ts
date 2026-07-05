@@ -1,5 +1,6 @@
 import GUI from 'lil-gui';
 import type { App, ModelKind } from './app';
+import { windSettings } from './wind';
 
 export function buildGui(app: App): GUI {
   const gui = new GUI({ title: 'Ivy Generator' });
@@ -30,6 +31,12 @@ export function buildGui(app: App): GUI {
   const fLeaves = gui.addFolder('Leaves (live)');
   fLeaves.add(s, 'leafDensity', 0, 30).name('Density').onChange(live);
   fLeaves.add(s, 'leafSize', 0.03, 0.25).name('Size').onChange(live);
+
+  // Wind is read by every plant each frame — sliders act immediately, no regrow needed.
+  const fWind = gui.addFolder('Wind (live)');
+  fWind.add(windSettings, 'strength', 0, 1).name('Strength');
+  fWind.add(windSettings, 'speed', 0.1, 3).name('Speed');
+  fWind.add(windSettings, 'directionDeg', 0, 360, 1).name('Direction (°)');
 
   const fLook = gui.addFolder('Look (live)');
   fLook
