@@ -28,6 +28,9 @@ export function buildGui(app: App): GUI {
     .name('Preset')
     .onChange((v: ModelKind) => app.setModel(v));
   fModel.add({ load: () => pickGlb(app) }, 'load').name('Load .glb…');
+  // Rescaling the surface invalidates painted strokes, so this clears the ivy on change.
+  fModel.add(s, 'modelScale', 0.2, 3).name('Model scale (clears ivy)').listen()
+    .onChange((v: number) => app.setModelScale(v));
   ivyFolders.push(fModel);
 
   const fDraw = gui.addFolder('Drawing');

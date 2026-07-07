@@ -10,6 +10,8 @@ import { buildGui } from './ui';
 export type ModelKind = 'Sphere' | 'Torus Knot' | 'Box' | 'Cylinder';
 export type Generator = 'Ivy' | 'Tree';
 
+const GROUND_Y = -1.4; // y of the ground disc; models rest here and the tree roots here
+
 interface Stroke {
   samples: SurfaceSample[];
   index: number; // stable per-stroke id; combined with the global seed to vary each plant
@@ -23,6 +25,7 @@ export class App {
     generator: Generator;
     pushForce: number;
     flowerBrush: number;
+    modelScale: number;
   } = {
     ...defaultIvySettings,
     drawMode: true,
@@ -31,6 +34,7 @@ export class App {
     generator: 'Ivy',
     pushForce: 1,      // multiplier on the branch push interaction
     flowerBrush: 0.28, // radius of the F-brush that blooms ivy flowers
+    modelScale: 1,     // user multiplier over the model's fit-to-view scale
   };
 
   /** Banyan parameters, edited by the GUI (quality/speed come from `settings`). */
@@ -46,6 +50,13 @@ export class App {
   private plants: IvyPlant[] = [];
   private strokes: Stroke[] = [];
   private tree: TreePlant | null = null;
+  // Current model placement: the wrapper, its fit-to-view scale, and the box used to
+  // recentre/reground it, so the Model-scale slider can re-place it live.
+  private modelContainer: THREE.Group | null = null;
+  private modelFitScale = 1;
+  private modelCenter = new THREE.Vector3();
+  private modelMinY = 0;
+  private modelGrounded = false; // GLBs rest on the ground; primitives stay centered
   private hud = document.getElementById('hud')!;
   private lastTime = 0;
   private hovering = false;
@@ -370,7 +381,7 @@ export class App {
       growthSpeed: this.settings.growthSpeed,
     };
     this.tree = new TreePlant(settings, this.effectiveSeed(7777));
-    this.tree.group.position.set(0, -1.4, 0); // rooted on the ground disc
+    this.tree.group.position.set(0, GROUND_Y, 0); // rooted on the ground disc
     this.tree.group.visible = this.settings.generator === 'Tree';
     this.scene.add(this.tree.group);
     if (!animate) this.tree.finishGrowth();
@@ -386,6 +397,7 @@ export class App {
   setModel(kind: ModelKind): void {
     this.clearAll();
     this.disposeModel();
+    this.settings.modelScale = 1; // a fresh model starts at its fit scale
 
     let geo: THREE.BufferGeometry;
     switch (kind) {
@@ -404,32 +416,77 @@ export class App {
     const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x9aa1ab, roughness: 0.9 }));
     mesh.castShadow = true;
     mesh.receiveShadow = true;
-    this.modelRoot.add(mesh);
-    indexForRaycasts(this.modelRoot);
+    // Primitives are authored centered at the origin — keep them there (grounded = false).
+    this.installModel(mesh, 1, false);
+  }
+
+  /**
+   * Wrap a model (primitive or GLB) in a container we own, record its fit info, and place
+   * it. `fitScale` is the base scale that frames it; the Model-scale slider multiplies it.
+   * `grounded` rests the box bottom on the ground disc; otherwise it centers at the origin.
+   */
+  private installModel(model: THREE.Object3D, fitScale: number, grounded: boolean): void {
+    const container = new THREE.Group();
+    container.add(model);
+    container.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(model);
+    box.getCenter(this.modelCenter);
+    this.modelMinY = box.min.y;
+    this.modelFitScale = fitScale;
+    this.modelGrounded = grounded;
+    this.modelContainer = container;
+
+    this.modelRoot.add(container);
+    this.applyModelScale();
+    indexForRaycasts(this.modelRoot); // BVH indexes local geometry; scaling won't invalidate it
+  }
+
+  /** Re-place the current model for the fit scale × the user's Model-scale slider. */
+  private applyModelScale(): void {
+    const c = this.modelContainer;
+    if (!c) return;
+    const s = this.modelFitScale * this.settings.modelScale;
+    c.scale.setScalar(s);
+    c.position.set(
+      -this.modelCenter.x * s,
+      this.modelGrounded ? GROUND_Y - this.modelMinY * s : -this.modelCenter.y * s,
+      -this.modelCenter.z * s,
+    );
+    c.updateMatrixWorld(true);
+  }
+
+  /** Model-scale slider: rescale live and clear the ivy (its surface just moved). */
+  setModelScale(v: number): void {
+    this.settings.modelScale = v;
+    this.applyModelScale();
+    this.clearAll();
   }
 
   async loadGlbFile(file: File): Promise<void> {
     const url = URL.createObjectURL(file);
     try {
       const gltf = await new GLTFLoader().loadAsync(url);
-      const root = gltf.scene;
-
-      // Normalize: center on the origin, scale to a ~1.3 unit bounding-sphere radius.
-      const sphere = new THREE.Box3().setFromObject(root).getBoundingSphere(new THREE.Sphere());
-      const scale = sphere.radius > 0 ? 1.3 / sphere.radius : 1;
-      root.scale.setScalar(scale);
-      root.position.copy(sphere.center).multiplyScalar(-scale);
-      root.traverse((o) => {
+      const model = gltf.scene;
+      model.traverse((o) => {
         if ((o as THREE.Mesh).isMesh) {
           o.castShadow = true;
           o.receiveShadow = true;
         }
       });
 
+      // Fit to view on a WRAPPER (installModel), so the model keeps its own authored
+      // transforms — many GLBs bake a scale or a Z-up→Y-up rotation into their root node,
+      // and overwriting it distorts or mis-orients the import. We only uniform-scale + place
+      // the wrapper, and rest it on the ground so it doesn't float. A fresh import resets the
+      // Model-scale slider to 1× (the fit scale).
+      const box = new THREE.Box3().setFromObject(model);
+      const size = box.getSize(new THREE.Vector3());
+      const fitScale = 2.6 / Math.max(size.x, size.y, size.z, 1e-3);
+
       this.clearAll();
       this.disposeModel();
-      this.modelRoot.add(root);
-      indexForRaycasts(this.modelRoot); // BVH: heavy GLBs stay fast to paint and grow on
+      this.settings.modelScale = 1;
+      this.installModel(model, fitScale, true);
     } catch (err) {
       console.error('Failed to load model:', err);
       alert('Could not load that file. Self-contained .glb files work best (no Draco compression).');
@@ -448,6 +505,7 @@ export class App {
       for (const m of mats) m.dispose();
     });
     this.modelRoot.clear();
+    this.modelContainer = null;
   }
 
   private paintTargets(): THREE.Object3D[] {
@@ -550,7 +608,7 @@ export class App {
       new THREE.MeshStandardMaterial({ color: 0x1a1f26, roughness: 1 }),
     );
     ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -1.4;
+    ground.position.y = GROUND_Y;
     ground.receiveShadow = true;
 
     this.scene.add(hemi, key, rim, ground);
