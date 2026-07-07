@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { createIvyLeafTexture } from './leafTexture';
+import { getBudBallGeometry, getUmbelGeometry, getUmbelMaterial } from './flowers';
 import { windSettings } from './wind';
 
 export type Quality = 'low' | 'high';
@@ -19,6 +20,8 @@ export interface IvySettings {
   extend: number;        // keep growing this far past the end of the stroke
   leafDensity: number;   // leaves per world unit of stem
   leafSize: number;
+  flowerDensity: number; // umbel bud sites per world unit of stem (bloom via the F brush)
+  flowerSize: number;
 }
 
 export const defaultIvySettings: IvySettings = {
@@ -31,6 +34,8 @@ export const defaultIvySettings: IvySettings = {
   extend: 0.9,
   leafDensity: 14,
   leafSize: 0.11,
+  flowerDensity: 2.5,
+  flowerSize: 0.14,
 };
 
 const STEP = 0.03;             // spacing between stem rings (world units)
@@ -56,6 +61,19 @@ interface Leaf {
   scale: number;
   birth: number;
   color: THREE.Color;
+}
+
+/** A flower umbel site. It stays an invisible bud until the F brush blooms it. */
+interface Flower {
+  pos: THREE.Vector3;
+  quat: THREE.Quaternion; // stalk grows along the local +Y (off the surface)
+  phase: number;
+  scale: number;
+  birth: number;
+  tint: THREE.Color;
+  bloom: number;  // current 0..1 (springs toward target, overshooting into a pop)
+  vel: number;
+  target: number; // 0 = bud, 1 = fully bloomed
 }
 
 // Scratch objects for the per-frame leaf pose pass (avoid allocating in the loop).
@@ -234,6 +252,11 @@ export class IvyPlant {
   private leafMesh: THREE.InstancedMesh | null = null;
   private leafCount = 0;    // instances currently revealed
   private restApplied = false; // matrices already written for still air + finished growth
+  private flowers: Flower[] = [];
+  private flowerMesh: THREE.InstancedMesh | null = null; // open umbels (bloom > 0)
+  private budMesh: THREE.InstancedMesh | null = null;    // closed bud-balls (bloom < 1)
+  private bloomAnim = false;    // any bloom spring currently moving
+  private flowersRested = false;
   private progress = 0;
   private total = 0;
   private done = false;
@@ -257,21 +280,46 @@ export class IvyPlant {
 
   /** Advance the growth animation (stem reveal + leaf reveal; leaf poses are updateLeaves'). */
   update(dt: number): void {
-    if (this.done) return;
-    this.progress += dt * this.settings.growthSpeed;
-    const p = this.progress;
+    if (!this.done) {
+      this.progress += dt * this.settings.growthSpeed;
+      const p = this.progress;
 
-    for (const st of this.stems) {
-      while (st.vis < st.births.length && st.births[st.vis] <= p) st.vis++;
-      st.mesh.geometry.setDrawRange(0, Math.max(st.vis - 1, 0) * st.radial * 6);
+      for (const st of this.stems) {
+        while (st.vis < st.births.length && st.births[st.vis] <= p) st.vis++;
+        st.mesh.geometry.setDrawRange(0, Math.max(st.vis - 1, 0) * st.radial * 6);
+      }
+
+      if (this.leafMesh) {
+        while (this.leafCount < this.leaves.length && this.leaves[this.leafCount].birth <= p) this.leafCount++;
+        this.leafMesh.count = this.leafCount;
+      }
+
+      if (p >= this.total + LEAF_GROW_WINDOW) this.done = true;
     }
 
-    if (this.leafMesh) {
-      while (this.leafCount < this.leaves.length && this.leaves[this.leafCount].birth <= p) this.leafCount++;
-      this.leafMesh.count = this.leafCount;
+    // Bloom springs run even after growth is done: underdamped, so a triggered flower
+    // overshoots full size and settles back — the "pop".
+    if (this.bloomAnim) {
+      let any = false;
+      const step = Math.min(dt, 0.033);
+      for (const f of this.flowers) {
+        const d = f.target - f.bloom;
+        if (Math.abs(d) < 1e-3 && Math.abs(f.vel) < 1e-3) {
+          f.bloom = f.target;
+          f.vel = 0;
+          continue;
+        }
+        f.vel += (d * 30 - f.vel * 5.5) * step;
+        f.bloom += f.vel * step;
+        if (f.bloom < 0) {
+          f.bloom = 0;
+          f.vel = 0;
+        }
+        any = true;
+      }
+      this.bloomAnim = any;
+      this.flowersRested = false;
     }
-
-    if (p >= this.total + LEAF_GROW_WINDOW) this.done = true;
   }
 
   /**
@@ -285,15 +333,17 @@ export class IvyPlant {
    *    leaf frame) but barely toward it, so they never get pushed inside the mesh.
    */
   updateLeaves(t: number): void {
-    if (!this.leafMesh || this.leafCount === 0) return;
     const w = windSettings;
     const windy = w.strength > 0.001;
-    if (!windy && this.done && this.restApplied) return; // nothing can have changed
-
     const speed = w.speed;
     const rad = THREE.MathUtils.degToRad(w.directionDeg);
     const dx = Math.cos(rad);
     const dz = Math.sin(rad);
+
+    this.poseFlowers(t, windy, speed);
+
+    if (!this.leafMesh || this.leafCount === 0) return;
+    if (!windy && this.done && this.restApplied) return; // nothing can have changed
 
     for (let i = 0; i < this.leafCount; i++) {
       const leaf = this.leaves[i];
@@ -326,15 +376,82 @@ export class IvyPlant {
     this.restApplied = !windy && this.done;
   }
 
+  /**
+   * Instance matrices for the flowers. Every site is VISIBLE from the moment that part of
+   * the vine has grown — as a tight bud-ball. The F brush morphs it: the ball shrinks away
+   * while the open umbel springs up in its place (with the pop overshoot).
+   */
+  private poseFlowers(t: number, windy: boolean, speed: number): void {
+    if (!this.flowerMesh || !this.budMesh) return;
+    if (!windy && !this.bloomAnim && this.flowersRested) return;
+
+    const w = windSettings;
+    for (let i = 0; i < this.flowers.length; i++) {
+      const f = this.flowers[i];
+      // scale-in as the vine grows past this site
+      let a = (this.progress - f.birth) / LEAF_GROW_WINDOW;
+      if (a > 1) a = 1;
+      else if (a < 0) a = 0;
+      const appear = a * a * (3 - 2 * a);
+
+      _q.copy(f.quat);
+      if (windy && appear > 0.05) {
+        // Stiff stalks: a fraction of the leaves' sway, no lean.
+        const sway = Math.sin(t * 2.3 * speed + f.phase) * w.strength * 0.1;
+        const bob = Math.sin(t * 3.4 * speed + f.phase * 1.7) * w.strength * 0.06;
+        _q.multiply(_qFlap.setFromAxisAngle(_X, sway)).multiply(_qTwist.setFromAxisAngle(_Y, bob));
+      }
+
+      const budScale = Math.max(f.scale * appear * Math.max(1 - f.bloom, 0), 1e-4);
+      _m.compose(f.pos, _q, _s.set(budScale, budScale, budScale));
+      this.budMesh.setMatrixAt(i, _m);
+
+      const umbelScale = Math.max(f.scale * appear * f.bloom, 1e-4);
+      _m.compose(f.pos, _q, _s.set(umbelScale, umbelScale, umbelScale));
+      this.flowerMesh.setMatrixAt(i, _m);
+    }
+    this.budMesh.instanceMatrix.needsUpdate = true;
+    this.flowerMesh.instanceMatrix.needsUpdate = true;
+    this.flowersRested = !windy && !this.bloomAnim && this.done;
+  }
+
+  // ---------- blooming (the F brush) ----------
+
+  /** Bloom every unopened bud within `radius` of `point` (only on already-grown vine). */
+  bloomAt(point: THREE.Vector3, radius: number): void {
+    const r2 = radius * radius;
+    for (const f of this.flowers) {
+      if (f.target === 0 && f.birth <= this.progress && f.pos.distanceToSquared(point) <= r2) {
+        f.target = 1;
+        this.bloomAnim = true;
+      }
+    }
+  }
+
+  bloomAll(): void {
+    for (const f of this.flowers) {
+      if (f.birth <= this.progress) f.target = 1;
+    }
+    this.bloomAnim = true;
+  }
+
+  resetBlooms(): void {
+    for (const f of this.flowers) f.target = 0;
+    this.bloomAnim = true;
+  }
+
   /** Jump straight to the fully-grown state (used when tweaking settings live). */
   finishGrowth(): void {
     this.progress = this.total + LEAF_GROW_WINDOW + 1;
+    this.done = false;
     this.update(0);
   }
 
   dispose(): void {
     for (const st of this.stems) st.mesh.geometry.dispose();
     this.leafMesh?.dispose();
+    this.flowerMesh?.dispose();
+    this.budMesh?.dispose();
     this.group.removeFromParent();
   }
 
@@ -376,6 +493,7 @@ export class IvyPlant {
 
     for (const stem of stems) this.sprinkleLeaves(stem, rnd);
     this.leaves.sort((a, b) => a.birth - b.birth);
+    for (const stem of stems) this.sprinkleFlowers(stem, rnd);
 
     this.total = 0;
     for (const stem of stems) {
@@ -513,6 +631,46 @@ export class IvyPlant {
     }
   }
 
+  /** Scatter umbel bud sites along a stem: rising off the surface, waiting for the F brush. */
+  private sprinkleFlowers(stem: Stem, rnd: () => number): void {
+    const s = this.settings;
+    if (s.flowerDensity <= 0) return;
+    const interval = 1 / s.flowerDensity;
+    let next = interval * (0.4 + rnd());
+    let acc = 0;
+    const tmp = new THREE.Vector3();
+
+    for (let i = 1; i < stem.nodes.length - 1; i++) {
+      acc += stem.nodes[i].pos.distanceTo(stem.nodes[i - 1].pos);
+      if (acc < next) continue;
+      next = acc + interval * (0.6 + 0.8 * rnd());
+
+      const node = stem.nodes[i];
+      // The stalk rises off the surface along the normal, with a slight upward reach.
+      const y = node.normal.clone()
+        .addScaledVector(randUnit(rnd, tmp), 0.22)
+        .add(new THREE.Vector3(0, 0.15, 0))
+        .normalize();
+      const x = new THREE.Vector3().crossVectors(y, randUnit(rnd, tmp));
+      if (x.lengthSq() < 1e-6) continue;
+      x.normalize();
+      const z = new THREE.Vector3().crossVectors(x, y);
+      const quat = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
+
+      this.flowers.push({
+        pos: node.pos.clone().addScaledVector(node.normal, s.stemRadius * 0.3),
+        quat,
+        phase: rnd() * Math.PI * 2,
+        scale: s.flowerSize * (0.7 + 0.6 * rnd()),
+        birth: node.birth + 0.1,
+        tint: new THREE.Color().setHSL(0.2 + rnd() * 0.08, 0.25, 0.82 + rnd() * 0.15),
+        bloom: 0,
+        vel: 0,
+        target: 0,
+      });
+    }
+  }
+
   private project(
     pos: THREE.Vector3,
     normal: THREE.Vector3,
@@ -564,6 +722,26 @@ export class IvyPlant {
       mesh.count = 0;
       this.leafMesh = mesh;
       this.group.add(mesh);
+    }
+
+    if (this.flowers.length > 0) {
+      const makeInstanced = (geo: THREE.BufferGeometry): THREE.InstancedMesh => {
+        const mesh = new THREE.InstancedMesh(geo, getUmbelMaterial(s.quality), this.flowers.length);
+        mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        mesh.castShadow = true;
+        mesh.frustumCulled = false;
+        const m = new THREE.Matrix4();
+        const sc = new THREE.Vector3();
+        this.flowers.forEach((f, i) => {
+          m.compose(f.pos, f.quat, sc.set(1e-4, 1e-4, 1e-4)); // revealed by poseFlowers
+          mesh.setMatrixAt(i, m);
+          mesh.setColorAt(i, f.tint);
+        });
+        this.group.add(mesh);
+        return mesh;
+      };
+      this.budMesh = makeInstanced(getBudBallGeometry(s.quality));
+      this.flowerMesh = makeInstanced(getUmbelGeometry(s.quality));
     }
   }
 }

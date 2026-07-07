@@ -46,6 +46,15 @@ export function buildGui(app: App): GUI {
   fIvyLeaves.add(s, 'leafSize', 0.03, 0.25).name('Size').onChange(live);
   ivyFolders.push(fIvyLeaves);
 
+  // Flower sites regrow live; blooming itself happens with the F brush (hover the ivy).
+  const fFlowers = gui.addFolder('Flowers (F to brush)');
+  fFlowers.add(s, 'flowerDensity', 0, 8).name('Bud sites / unit').onChange(live);
+  fFlowers.add(s, 'flowerSize', 0.05, 0.3).name('Size').onChange(live);
+  fFlowers.add(s, 'flowerBrush', 0.08, 0.6).name('Brush radius');
+  fFlowers.add({ bloom: () => app.bloomAll() }, 'bloom').name('🌼 Bloom all');
+  fFlowers.add({ reset: () => app.resetBlooms() }, 'reset').name('Reset blooms');
+  ivyFolders.push(fFlowers);
+
   // ---------- banyan tree ----------
 
   const t = app.treeParams;
