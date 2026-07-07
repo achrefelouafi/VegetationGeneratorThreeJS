@@ -1,13 +1,23 @@
 import GUI from 'lil-gui';
-import type { App, ModelKind } from './app';
+import type { App, Generator, ModelKind } from './app';
 import { windSettings } from './wind';
 
 export function buildGui(app: App): GUI {
-  const gui = new GUI({ title: 'Ivy Generator' });
+  const gui = new GUI({ title: 'Vegetation Generator' });
   const s = app.settings;
 
   // Live edits snap every existing plant to fully grown so you see the change immediately.
   const live = () => app.scheduleRegrow('instant');
+
+  const ivyFolders: GUI[] = [];
+  const treeFolders: GUI[] = [];
+
+  gui.add(s, 'generator', ['Ivy', 'Tree'] satisfies Generator[]).name('Generator').onChange((g: Generator) => {
+    app.setGenerator(g);
+    syncFolders(g);
+  });
+
+  // ---------- ivy ----------
 
   const fModel = gui.addFolder('Model');
   fModel
@@ -15,22 +25,60 @@ export function buildGui(app: App): GUI {
     .name('Preset')
     .onChange((v: ModelKind) => app.setModel(v));
   fModel.add({ load: () => pickGlb(app) }, 'load').name('Load .glb…');
+  ivyFolders.push(fModel);
 
   const fDraw = gui.addFolder('Drawing');
   fDraw.add(s, 'drawMode').name('Draw mode (D)').listen().onChange(() => app.applyModes());
   fDraw.add({ undo: () => app.undoLast() }, 'undo').name('Undo last ivy');
   fDraw.add({ clear: () => app.clearAll() }, 'clear').name('Clear all ivy');
+  ivyFolders.push(fDraw);
 
-  const fShape = gui.addFolder('Shape (live)');
+  const fShape = gui.addFolder('Ivy shape (live)');
   fShape.add(s, 'stemRadius', 0.003, 0.03).name('Stem radius').onChange(live);
   fShape.add(s, 'branchDensity', 0, 14, 1).name('Branches / unit').onChange(live);
   fShape.add(s, 'branchLength', 0.1, 1.5).name('Branch length').onChange(live);
   fShape.add(s, 'wander', 0, 1).name('Wildness').onChange(live);
   fShape.add(s, 'extend', 0, 3).name('Overgrow past stroke').onChange(live);
+  ivyFolders.push(fShape);
 
-  const fLeaves = gui.addFolder('Leaves (live)');
-  fLeaves.add(s, 'leafDensity', 0, 30).name('Density').onChange(live);
-  fLeaves.add(s, 'leafSize', 0.03, 0.25).name('Size').onChange(live);
+  const fIvyLeaves = gui.addFolder('Ivy leaves (live)');
+  fIvyLeaves.add(s, 'leafDensity', 0, 30).name('Density').onChange(live);
+  fIvyLeaves.add(s, 'leafSize', 0.03, 0.25).name('Size').onChange(live);
+  ivyFolders.push(fIvyLeaves);
+
+  // ---------- banyan tree ----------
+
+  const t = app.treeParams;
+
+  const fTrunk = gui.addFolder('Trunk & limbs (live)');
+  fTrunk.add(t, 'trunkHeight', 0.4, 2).name('Trunk height').onChange(live);
+  fTrunk.add(t, 'trunkGirth', 0.08, 0.4).name('Trunk girth').onChange(live);
+  fTrunk.add(t, 'buttress', 0, 1).name('Buttress roots').onChange(live);
+  fTrunk.add(t, 'limbs', 2, 8, 1).name('Main limbs').onChange(live);
+  fTrunk.add(t, 'limbLength', 0.6, 2.4).name('Limb length').onChange(live);
+  fTrunk.add(t, 'spread', 0, 1).name('Crown spread').onChange(live);
+  fTrunk.add(t, 'gnarl', 0, 1).name('Gnarl').onChange(live);
+  fTrunk.add(t, 'splits', 1, 3, 1).name('Fork generations').onChange(live);
+  treeFolders.push(fTrunk);
+
+  const fCanopy = gui.addFolder('Canopy (live)');
+  fCanopy.add(t, 'clumpSize', 0.15, 0.8).name('Clump size').onChange(live);
+  fCanopy.add(t, 'clumpDensity', 0, 140, 1).name('Sprigs per clump').onChange(live);
+  fCanopy.add(t, 'leafSize', 0.06, 0.35).name('Sprig size').onChange(live);
+  fCanopy.add(t, 'leafHue', 0.05, 0.35).name('Hue (autumn ↔ green)').onChange(live);
+  treeFolders.push(fCanopy);
+
+  const fVines = gui.addFolder('Hanging vines (live)');
+  fVines.add(t, 'vineCount', 0, 60, 1).name('Count').onChange(live);
+  fVines.add(t, 'vineLength', 0.2, 2).name('Length').onChange(live);
+  treeFolders.push(fVines);
+
+  // Read at pointer-time — no regrow, acts immediately on the next push.
+  const fInteract = gui.addFolder('Interaction (live)');
+  fInteract.add(s, 'pushForce', 0.1, 4).name('Push force');
+  treeFolders.push(fInteract);
+
+  // ---------- shared ----------
 
   // Wind is read by every plant each frame — sliders act immediately, no regrow needed.
   const fWind = gui.addFolder('Wind (live)');
@@ -50,6 +98,12 @@ export function buildGui(app: App): GUI {
   const fGrowth = gui.addFolder('Growth animation');
   fGrowth.add(s, 'growthSpeed', 0.1, 3).name('Speed (needs Redraw)');
   fGrowth.add({ redraw: () => app.scheduleRegrow('animate') }, 'redraw').name('▶ Redraw (replay growth)');
+
+  function syncFolders(g: Generator): void {
+    for (const f of ivyFolders) (g === 'Ivy' ? f.show() : f.hide());
+    for (const f of treeFolders) (g === 'Tree' ? f.show() : f.hide());
+  }
+  syncFolders(s.generator);
 
   return gui;
 }

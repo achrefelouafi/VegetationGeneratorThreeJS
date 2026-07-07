@@ -85,3 +85,80 @@ export function createIvyLeafTexture(size = 512): THREE.CanvasTexture {
   tex.anisotropy = 4;
   return tex;
 }
+
+/**
+ * A foliage "sprig" card for stylized tree canopies: a fan of small pointed leaves
+ * drawn in pale sage tones so the per-instance tint (dark olive → sunlit yellow-green)
+ * carries the canopy's color ramp. One card reads as a dozen leaves — the classic
+ * AAA trick for dense foliage at low instance counts.
+ */
+export function createSprigTexture(size = 512): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.scale(size / 512, size / 512);
+
+  // Deterministic little RNG so the sprig looks the same every run.
+  let s = 7;
+  const rnd = (): number => {
+    s = (s * 16807) % 2147483647;
+    return (s - 1) / 2147483646;
+  };
+
+  const drawLeaf = (x: number, y: number, ang: number, len: number, wid: number, shade: number): void => {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(ang);
+    // pointed oval blade along -Y
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(wid, -len * 0.35, wid * 0.55, -len * 0.72);
+    ctx.quadraticCurveTo(wid * 0.25, -len * 0.92, 0, -len);
+    ctx.quadraticCurveTo(-wid * 0.25, -len * 0.92, -wid * 0.55, -len * 0.72);
+    ctx.quadraticCurveTo(-wid, -len * 0.35, 0, 0);
+    ctx.closePath();
+    const g = 175 + shade * 45;
+    ctx.fillStyle = `rgb(${Math.round(g * 0.82)}, ${Math.round(g)}, ${Math.round(g * 0.62)})`;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(70, 90, 45, 0.5)';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    // midvein
+    ctx.beginPath();
+    ctx.moveTo(0, -len * 0.08);
+    ctx.lineTo(0, -len * 0.9);
+    ctx.strokeStyle = 'rgba(245, 250, 225, 0.4)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+  };
+
+  // Twiggy stalks fanning up from the base.
+  ctx.strokeStyle = 'rgba(120, 105, 70, 0.9)';
+  ctx.lineCap = 'round';
+  for (const a of [-0.55, -0.18, 0.18, 0.55]) {
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(256, 505);
+    ctx.quadraticCurveTo(256 + Math.sin(a) * 90, 350, 256 + Math.sin(a) * 190, 200 + Math.abs(a) * 90);
+    ctx.stroke();
+  }
+
+  // Leaves: back layer (darker) then front layer (lighter), fanning upward-outward.
+  for (let layer = 0; layer < 2; layer++) {
+    const count = layer === 0 ? 9 : 8;
+    for (let i = 0; i < count; i++) {
+      const f = i / (count - 1);
+      const ang = (f - 0.5) * 2.4 + (rnd() - 0.5) * 0.35;
+      const reach = 150 + rnd() * 165;
+      const x = 256 + Math.sin(ang) * reach * (0.55 + rnd() * 0.45);
+      const y = 480 - Math.cos(ang) * reach - layer * 40 - rnd() * 60;
+      drawLeaf(x, y, ang * 0.8 + (rnd() - 0.5) * 0.4, 95 + rnd() * 60, 30 + rnd() * 14, layer * 0.6 + rnd() * 0.4);
+    }
+  }
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}

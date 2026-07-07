@@ -2,10 +2,12 @@ import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { IvyPlant, defaultIvySettings, type IvySettings, type SurfaceSample } from './ivy';
+import { TreePlant, defaultTreeSettings, type TreeSettings } from './tree';
 import { SurfacePainter } from './surfacePainter';
 import { buildGui } from './ui';
 
 export type ModelKind = 'Sphere' | 'Torus Knot' | 'Box' | 'Cylinder';
+export type Generator = 'Ivy' | 'Tree';
 
 interface Stroke {
   samples: SurfaceSample[];
@@ -13,12 +15,23 @@ interface Stroke {
 }
 
 export class App {
-  readonly settings: IvySettings & { drawMode: boolean; model: ModelKind; seed: number } = {
+  readonly settings: IvySettings & {
+    drawMode: boolean;
+    model: ModelKind;
+    seed: number;
+    generator: Generator;
+    pushForce: number;
+  } = {
     ...defaultIvySettings,
     drawMode: true,
     model: 'Sphere',
     seed: 1,
+    generator: 'Ivy',
+    pushForce: 1, // multiplier on the branch push interaction (hover nudge + drag shove)
   };
+
+  /** Banyan parameters, edited by the GUI (quality/speed come from `settings`). */
+  readonly treeParams: TreeSettings = { ...defaultTreeSettings };
 
   private renderer!: THREE.WebGPURenderer;
   private scene = new THREE.Scene();
@@ -26,12 +39,20 @@ export class App {
   private controls!: OrbitControls;
   private painter!: SurfacePainter;
   private modelRoot = new THREE.Group();
+  private ivyRoot = new THREE.Group();
   private plants: IvyPlant[] = [];
   private strokes: Stroke[] = [];
+  private tree: TreePlant | null = null;
   private hud = document.getElementById('hud')!;
   private lastTime = 0;
   private hovering = false;
   private toastTimer = 0;
+  /** Tree mode: brushing the pointer over limbs or foliage pushes them (toggled with D). */
+  private interactMode = true;
+  private branchMarker!: THREE.Mesh;
+  private lastPX = 0;
+  private lastPY = 0;
+  private branchRay = new THREE.Raycaster();
   private strokeCounter = 0;
   private regrowPending: 'instant' | 'animate' | null = null;
 
@@ -57,7 +78,7 @@ export class App {
     this.controls.maxDistance = 12;
 
     this.setupLights();
-    this.scene.add(this.modelRoot);
+    this.scene.add(this.modelRoot, this.ivyRoot);
     this.setModel(this.settings.model);
 
     this.painter = new SurfacePainter(renderer.domElement, this.camera, this.scene, () => this.paintTargets());
@@ -69,6 +90,16 @@ export class App {
       this.hovering = over;
       this.updateHud();
     };
+
+    this.branchMarker = new THREE.Mesh(
+      new THREE.SphereGeometry(0.035, 16, 12),
+      new THREE.MeshBasicMaterial({ color: 0xc6ff5e, transparent: true, opacity: 0.9, depthTest: false }),
+    );
+    this.branchMarker.renderOrder = 12;
+    this.branchMarker.visible = false;
+    this.scene.add(this.branchMarker);
+
+    renderer.domElement.addEventListener('pointermove', (e) => this.onTreePointerMove(e));
 
     buildGui(this);
     this.applyModes();
@@ -96,7 +127,78 @@ export class App {
   }
 
   toggleMode(): void {
-    this.settings.drawMode = !this.settings.drawMode;
+    if (this.settings.generator === 'Tree') {
+      this.interactMode = !this.interactMode;
+    } else {
+      this.settings.drawMode = !this.settings.drawMode;
+    }
+    this.applyModes();
+  }
+
+  // ---------- tree push interaction ----------
+
+  private treeInteractActive(): boolean {
+    return this.settings.generator === 'Tree' && this.interactMode && this.tree !== null;
+  }
+
+  /**
+   * Brushing the pointer over a limb or a foliage clump pushes it aside — no clicking.
+   * The force follows the pointer's movement mapped onto the camera's right/up axes, so
+   * the branch is swept in the direction you move, then springs back behind you.
+   */
+  private onTreePointerMove(e: PointerEvent): void {
+    const dx = e.clientX - this.lastPX;
+    const dy = e.clientY - this.lastPY;
+    this.lastPX = e.clientX;
+    this.lastPY = e.clientY;
+
+    if (!this.treeInteractActive()) {
+      this.branchMarker.visible = false;
+      return;
+    }
+
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    const py = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this.branchRay.setFromCamera(new THREE.Vector2(px, py), this.camera);
+    const hit = this.branchRay.intersectObjects(this.tree!.interactMeshes, false)[0];
+
+    if (!hit) {
+      this.branchMarker.visible = false;
+      this.renderer.domElement.style.cursor = '';
+      return;
+    }
+
+    this.branchMarker.visible = true;
+    this.branchMarker.position.copy(hit.point);
+    this.renderer.domElement.style.cursor = 'grab';
+
+    if (dx !== 0 || dy !== 0) {
+      const strength = this.settings.pushForce;
+      const right = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0);
+      const up = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 1);
+      const force = right.multiplyScalar(dx).addScaledVector(up, -dy)
+        .multiplyScalar(0.0035 * strength);
+      const cap = 0.25 * strength;
+      if (force.lengthSq() > cap * cap) force.normalize().multiplyScalar(cap);
+      this.tree!.pushAt(hit.object, hit.point, force);
+    }
+  }
+
+  /** Switch between the ivy (paint-on-mesh) and banyan tree generators. */
+  setGenerator(g: Generator): void {
+    this.settings.generator = g;
+    const ivy = g === 'Ivy';
+    document.body.classList.toggle('tree', !ivy);
+    this.modelRoot.visible = ivy;
+    this.ivyRoot.visible = ivy;
+    if (ivy) {
+      if (this.tree) this.tree.group.visible = false;
+    } else if (this.tree) {
+      this.tree.group.visible = true;
+    } else {
+      this.rebuildTree(true); // first visit: grow the banyan in
+    }
     this.applyModes();
   }
 
@@ -133,14 +235,29 @@ export class App {
     for (const p of this.plants) p.dispose();
     this.plants = [];
     for (const stroke of this.strokes) this.growPlant(stroke, animate);
+    if (this.tree) this.rebuildTree(animate);
   }
 
   private growPlant(stroke: Stroke, animate: boolean): void {
     const seed = this.effectiveSeed(stroke.index);
     const plant = new IvyPlant(stroke.samples, seed, { ...this.settings }, this.paintTargets());
-    this.scene.add(plant.group);
+    this.ivyRoot.add(plant.group);
     this.plants.push(plant);
     if (!animate) plant.finishGrowth();
+  }
+
+  private rebuildTree(animate: boolean): void {
+    this.tree?.dispose();
+    const settings: TreeSettings = {
+      ...this.treeParams,
+      quality: this.settings.quality,
+      growthSpeed: this.settings.growthSpeed,
+    };
+    this.tree = new TreePlant(settings, this.effectiveSeed(7777));
+    this.tree.group.position.set(0, -1.4, 0); // rooted on the ground disc
+    this.tree.group.visible = this.settings.generator === 'Tree';
+    this.scene.add(this.tree.group);
+    if (!animate) this.tree.finishGrowth();
   }
 
   /** Mix the global seed with a stroke's stable id so plants stay distinct but reseed together. */
@@ -225,16 +342,24 @@ export class App {
   // ---------- modes / hud ----------
 
   applyModes(): void {
-    const draw = this.settings.drawMode;
+    const g = this.settings.generator;
+    const draw = g === 'Ivy' && this.settings.drawMode;
+    const interact = g === 'Tree' && this.interactMode;
     this.painter.setEnabled(draw);
+    // Interact mode keeps orbiting available — dragging empty space rotates, dragging a
+    // branch pushes it (controls are suspended just for that drag).
     this.controls.enableRotate = !draw;
-    document.body.classList.toggle('draw', draw);
-    document.body.classList.toggle('orbit', !draw);
+    document.body.classList.toggle('draw', draw || interact);
+    document.body.classList.toggle('orbit', !(draw || interact));
 
     const btn = document.getElementById('modeBtn')!;
-    btn.querySelector('.label')!.textContent = draw ? 'Draw mode' : 'Orbit mode';
+    btn.querySelector('.label')!.textContent = draw ? 'Draw mode' : interact ? 'Interact mode' : 'Orbit mode';
 
     if (!draw) this.hovering = false;
+    if (!interact) {
+      if (this.branchMarker) this.branchMarker.visible = false;
+      this.renderer.domElement.style.cursor = '';
+    }
     this.updateHud();
   }
 
@@ -243,7 +368,13 @@ export class App {
       ? 'WebGPU'
       : 'WebGL2 (fallback)';
     let mode: string;
-    if (this.settings.drawMode) {
+    if (this.settings.generator === 'Tree') {
+      mode = this.interactMode
+        ? '<b>Interact mode</b> — sweep the cursor through branches or leaves to brush them aside; ' +
+          'they spring back behind you. Drag to orbit as usual. Press <b>D</b> to switch off.'
+        : '<b>Orbit mode</b> — drag to rotate, scroll to zoom. Press <b>D</b> to brush the tree around. ' +
+          'Sculpt it in the panel; <b>▶ Redraw</b> replays the growth.';
+    } else if (this.settings.drawMode) {
       mode = this.hovering
         ? '<b>Drag now</b> to paint an ivy path along the surface — it grows when you let go.'
         : 'Move over the model, then <b>drag</b> to paint an ivy path. Press <b>D</b> (or the button) to orbit.';
@@ -314,6 +445,10 @@ export class App {
     for (const plant of this.plants) {
       plant.update(dt);
       plant.updateLeaves(tSec);
+    }
+    if (this.tree) {
+      this.tree.update(dt);
+      this.tree.updateLeaves(tSec);
     }
     this.renderer.render(this.scene, this.camera);
   }
