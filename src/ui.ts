@@ -75,7 +75,7 @@ export function buildGui(app: App): GUI {
   treeFolders.push(fTrunk);
 
   const fCanopy = gui.addFolder('Canopy (live)');
-  fCanopy.add(t, 'clumpSize', 0.15, 0.8).name('Clump size').onChange(liveTree);
+  fCanopy.add(t, 'clumpSize', 0.15, 0.8).name('Clump size').onChange((v: number) => app.setTreeClumpSize(v));
   fCanopy.add(t, 'clumpDensity', 0, 140, 1).name('Sprigs per clump').onChange(liveTree);
   // Size and hue update existing instances in place — instant, no regrow.
   fCanopy.add(t, 'leafSize', 0.06, 0.35).name('Sprig size').onChange((v: number) => app.setTreeLeafSize(v));

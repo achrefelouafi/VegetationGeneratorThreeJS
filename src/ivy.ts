@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { firstHitOnly } from './bvh';
 import { createIvyLeafTexture } from './leafTexture';
 import { getBudBallGeometry, getUmbelGeometry, getUmbelMaterial } from './flowers';
 import { windSettings } from './wind';
@@ -260,7 +261,8 @@ export class IvyPlant {
   private progress = 0;
   private total = 0;
   private done = false;
-  private raycaster = new THREE.Raycaster();
+  // Hundreds of surface-projection rays run per rebuild — BVH + first-hit keeps them cheap.
+  private raycaster = firstHitOnly(new THREE.Raycaster());
 
   constructor(
     samples: SurfaceSample[],

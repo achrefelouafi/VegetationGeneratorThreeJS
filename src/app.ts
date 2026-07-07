@@ -1,6 +1,7 @@
 import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { disposeRaycastIndex, firstHitOnly, indexForRaycasts } from './bvh';
 import { IvyPlant, defaultIvySettings, type IvySettings, type SurfaceSample } from './ivy';
 import { TreePlant, defaultTreeSettings, type TreeSettings } from './tree';
 import { SurfacePainter } from './surfacePainter';
@@ -57,7 +58,7 @@ export class App {
   private flowerMarker!: THREE.Mesh;
   private lastPX = 0;
   private lastPY = 0;
-  private branchRay = new THREE.Raycaster();
+  private branchRay = firstHitOnly(new THREE.Raycaster());
   private strokeCounter = 0;
   private regrowPending: { mode: 'instant' | 'animate'; ivy: boolean; tree: boolean } | null = null;
   private lastRegrowAt = 0; // performance.now() of the last rebuild
@@ -198,6 +199,10 @@ export class App {
 
   setTreeLeafSize(v: number): void {
     this.tree?.setLeafSize(v);
+  }
+
+  setTreeClumpSize(v: number): void {
+    this.tree?.setClumpSize(v);
   }
 
   setTreeLeafHue(v: number): void {
@@ -400,6 +405,7 @@ export class App {
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     this.modelRoot.add(mesh);
+    indexForRaycasts(this.modelRoot);
   }
 
   async loadGlbFile(file: File): Promise<void> {
@@ -423,6 +429,7 @@ export class App {
       this.clearAll();
       this.disposeModel();
       this.modelRoot.add(root);
+      indexForRaycasts(this.modelRoot); // BVH: heavy GLBs stay fast to paint and grow on
     } catch (err) {
       console.error('Failed to load model:', err);
       alert('Could not load that file. Self-contained .glb files work best (no Draco compression).');
@@ -435,6 +442,7 @@ export class App {
     this.modelRoot.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh) return;
+      disposeRaycastIndex(mesh.geometry);
       mesh.geometry.dispose();
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       for (const m of mats) m.dispose();

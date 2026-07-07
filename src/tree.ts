@@ -133,6 +133,7 @@ interface Fig {
 interface FigCluster {
   mesh: THREE.InstancedMesh; // parented to its twig group, so it grows/pushes with it
   figs: Fig[];
+  tip: THREE.Vector3; // twig-tip anchor the figs cluster around (for in-place rescaling)
 }
 
 function mulberry32(seed: number): () => number {
@@ -751,6 +752,27 @@ export class TreePlant {
     }
   }
 
+  /**
+   * Rescale every clump's card offsets (and the figs nestled in them) about its twig tip —
+   * geometrically identical to regenerating with a new clump size, at matrix-write cost.
+   */
+  setClumpSize(v: number): void {
+    const r = v / this.settings.clumpSize;
+    if (!Number.isFinite(r) || r <= 0 || r === 1) return;
+    this.settings.clumpSize = v;
+    for (const c of this.clumps) {
+      for (const card of c.cards) card.pos.multiplyScalar(r); // relative to the tip already
+      const tip = c.mesh.position;
+      c.proxy.position.y = tip.y + (c.proxy.position.y - tip.y) * r;
+      c.proxy.scale.multiplyScalar(r);
+    }
+    for (const fc of this.figClusters) {
+      for (const f of fc.figs) f.pos.sub(fc.tip).multiplyScalar(r).add(fc.tip);
+    }
+    this.restApplied = false;
+    this.figsRested = false;
+  }
+
   /** Rescale every fig without rebuilding the tree. */
   setFigSize(v: number): void {
     const r = v / this.settings.figSize;
@@ -1004,7 +1026,7 @@ export class TreePlant {
       mesh.setColorAt(i, FIG_GREEN);
     });
     parentGroup.add(mesh);
-    this.figClusters.push({ mesh, figs });
+    this.figClusters.push({ mesh, figs, tip: tip.pos.clone() });
   }
 
   private addStem(

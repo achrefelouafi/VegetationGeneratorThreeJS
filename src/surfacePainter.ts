@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { firstHitOnly } from './bvh';
 import type { SurfaceSample } from './ivy';
 
 const STROKE_COLOR = 0xc6ff5e;
@@ -26,7 +27,7 @@ export class SurfacePainter {
   /** Fired when the surface is hovered (true) or the cursor leaves it (false), in draw mode. */
   onHoverChange: ((over: boolean) => void) | null = null;
 
-  private raycaster = new THREE.Raycaster();
+  private raycaster = firstHitOnly(new THREE.Raycaster()); // BVH: smooth picking on heavy models
   private pointer = new THREE.Vector2();
   private samples: SurfaceSample[] = [];
   private active = false;
