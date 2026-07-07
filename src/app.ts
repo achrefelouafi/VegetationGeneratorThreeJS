@@ -147,17 +147,21 @@ export class App {
   toggleMode(): void {
     if (this.settings.generator === 'Tree') {
       this.interactMode = !this.interactMode;
+      if (this.interactMode) this.flowerMode = false; // D and F are exclusive
     } else {
       this.settings.drawMode = !this.settings.drawMode;
-      if (this.settings.drawMode) this.flowerMode = false; // D and F are exclusive
+      if (this.settings.drawMode) this.flowerMode = false;
     }
     this.applyModes();
   }
 
+  /** F: the bloom brush — flowers on the ivy, figs on the banyan. */
   toggleFlowerMode(): void {
-    if (this.settings.generator !== 'Ivy') return;
     this.flowerMode = !this.flowerMode;
-    if (this.flowerMode) this.settings.drawMode = false; // D and F are exclusive
+    if (this.flowerMode) {
+      if (this.settings.generator === 'Ivy') this.settings.drawMode = false;
+      else this.interactMode = false;
+    }
     this.applyModes();
   }
 
@@ -169,11 +173,24 @@ export class App {
     for (const p of this.plants) p.resetBlooms();
   }
 
+  ripenAll(): void {
+    this.tree?.ripenAll();
+  }
+
+  resetRipe(): void {
+    this.tree?.resetRipe();
+  }
+
   // ---------- ivy flower brush (F) ----------
 
-  /** Hovering the brush over the model surface blooms every bud within its radius. */
+  /** Hovering the brush blooms ivy flowers / ripens banyan figs within its radius. */
   private onFlowerPointerMove(e: PointerEvent): void {
-    if (!(this.settings.generator === 'Ivy' && this.flowerMode)) {
+    if (!this.flowerMode) {
+      this.flowerMarker.visible = false;
+      return;
+    }
+    const tree = this.settings.generator === 'Tree';
+    if (tree && !this.tree) {
       this.flowerMarker.visible = false;
       return;
     }
@@ -182,7 +199,9 @@ export class App {
     const px = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     const py = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this.branchRay.setFromCamera(new THREE.Vector2(px, py), this.camera);
-    const hit = this.branchRay.intersectObjects(this.paintTargets(), true)[0];
+    const hit = tree
+      ? this.branchRay.intersectObjects(this.tree!.interactMeshes, false)[0]
+      : this.branchRay.intersectObjects(this.paintTargets(), true)[0];
 
     if (!hit) {
       this.flowerMarker.visible = false;
@@ -193,7 +212,8 @@ export class App {
     this.flowerMarker.visible = true;
     this.flowerMarker.position.copy(hit.point);
     this.flowerMarker.scale.setScalar(radius);
-    for (const p of this.plants) p.bloomAt(hit.point, radius);
+    if (tree) this.tree!.ripenAt(hit.point, radius);
+    else for (const p of this.plants) p.bloomAt(hit.point, radius);
   }
 
   // ---------- tree push interaction ----------
@@ -405,8 +425,8 @@ export class App {
   applyModes(): void {
     const g = this.settings.generator;
     const draw = g === 'Ivy' && this.settings.drawMode;
-    const flower = g === 'Ivy' && this.flowerMode;
-    const interact = g === 'Tree' && this.interactMode;
+    const flower = this.flowerMode; // ivy: bloom brush; tree: fig-ripening brush
+    const interact = g === 'Tree' && this.interactMode && !flower;
     this.painter.setEnabled(draw);
     // Hover-based modes (flower brush, tree interact) keep orbiting available.
     this.controls.enableRotate = !draw;
@@ -416,7 +436,9 @@ export class App {
 
     const btn = document.getElementById('modeBtn')!;
     btn.querySelector('.label')!.textContent =
-      draw ? 'Draw mode' : flower ? 'Flower brush' : interact ? 'Interact mode' : 'Orbit mode';
+      draw ? 'Draw mode'
+        : flower ? (g === 'Tree' ? 'Fig brush' : 'Flower brush')
+          : interact ? 'Interact mode' : 'Orbit mode';
     const key = btn.querySelector('.key') as HTMLElement;
     key.textContent = flower ? 'F' : 'D';
     key.style.display = draw || flower || interact ? '' : 'none'; // plain "Orbit mode" when idle
@@ -436,11 +458,14 @@ export class App {
       : 'WebGL2 (fallback)';
     let mode: string;
     if (this.settings.generator === 'Tree') {
-      mode = this.interactMode
-        ? '<b>Interact mode</b> — sweep the cursor through branches or leaves to brush them aside; ' +
-          'they spring back behind you. Drag to orbit as usual. Press <b>D</b> to switch off.'
-        : '<b>Orbit mode</b> — drag to rotate, scroll to zoom. Press <b>D</b> to brush the tree around. ' +
-          'Sculpt it in the panel; <b>▶ Redraw</b> replays the growth.';
+      mode = this.flowerMode
+        ? '<b>Fig brush</b> — hover the twigs and watch the green figs swell and ripen red. ' +
+          'Drag to orbit as usual. Press <b>F</b> to put the brush away.'
+        : this.interactMode
+          ? '<b>Interact mode</b> — sweep the cursor through branches or leaves to brush them aside; ' +
+            'they spring back behind you. Drag to orbit as usual. Press <b>D</b> to switch off, <b>F</b> to ripen figs.'
+          : '<b>Orbit mode</b> — drag to rotate, scroll to zoom. Press <b>D</b> to brush the tree around, ' +
+            '<b>F</b> to ripen its figs. <b>▶ Redraw</b> replays the growth.';
     } else if (this.flowerMode) {
       mode = '<b>Flower brush</b> — hover over the ivy and watch the buds pop into bloom. ' +
         'Drag to orbit as usual. Press <b>F</b> to put the brush away.';

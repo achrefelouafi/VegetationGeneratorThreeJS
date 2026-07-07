@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { createSprigTexture } from './leafTexture';
 import { windSettings } from './wind';
 import type { Quality } from './ivy';
@@ -37,6 +38,8 @@ export interface TreeSettings {
   leafHue: number;      // 0.05 autumn … 0.35 deep green (reference sits ~0.15)
   vineCount: number;
   vineLength: number;
+  figDensity: number; // figs per twig (a banyan is a ficus — the fig IS its flower)
+  figSize: number;
 }
 
 export const defaultTreeSettings: TreeSettings = {
@@ -56,6 +59,8 @@ export const defaultTreeSettings: TreeSettings = {
   leafHue: 0.15,
   vineCount: 26,
   vineLength: 1.2,
+  figDensity: 3,
+  figSize: 0.05,
 };
 
 const UP = new THREE.Vector3(0, 1, 0);
@@ -98,6 +103,9 @@ interface Clump {
   mesh: THREE.InstancedMesh;
   cards: Card[];
   count: number;
+  /** Invisible ellipsoid enclosing the puff — a solid raycast target, since rays slip
+   *  between the individual sprig cards. */
+  proxy: THREE.Mesh;
 }
 
 interface Vine {
@@ -107,6 +115,24 @@ interface Vine {
   scale: number;
   gust: number;
   phase: number;
+}
+
+/** One fig on a twig. Grows in green and small; the F brush ripens it (swell + blush). */
+interface Fig {
+  pos: THREE.Vector3; // local to the twig group
+  quat: THREE.Quaternion;
+  phase: number;
+  scale: number;
+  birth: number;
+  hueJitter: number;
+  ripe: number;   // 0 = green and small, springs toward target with a pop
+  vel: number;
+  target: number;
+}
+
+interface FigCluster {
+  mesh: THREE.InstancedMesh; // parented to its twig group, so it grows/pushes with it
+  figs: Fig[];
 }
 
 function mulberry32(seed: number): () => number {
@@ -272,6 +298,51 @@ function getVineMaterial(streamer: boolean): THREE.MeshStandardMaterial {
   return vineMat;
 }
 
+// Fig colors: matte green when unripe, blushing to orange-red as they ripen.
+const FIG_GREEN = new THREE.Color('#86a352');
+const FIG_RIPE = new THREE.Color('#c8502f');
+const MAX_FIGS = 1200;
+
+let figGeoHigh: THREE.BufferGeometry | null = null;
+let figGeoLow: THREE.BufferGeometry | null = null;
+let figMat: THREE.MeshStandardMaterial | null = null;
+let proxyGeo: THREE.SphereGeometry | null = null;
+let proxyMat: THREE.MeshBasicMaterial | null = null;
+
+/** Never rendered (visible = false) — exists purely for pointer raycasts. */
+function makeClumpProxy(): THREE.Mesh {
+  proxyGeo ??= new THREE.SphereGeometry(1, 12, 8);
+  proxyMat ??= new THREE.MeshBasicMaterial();
+  const mesh = new THREE.Mesh(proxyGeo, proxyMat);
+  mesh.visible = false;
+  return mesh;
+}
+
+/** A little hanging fig: stalk at the origin (the twig attachment), body below. */
+function getFigGeometry(quality: Quality): THREE.BufferGeometry {
+  const cached = quality === 'high' ? figGeoHigh : figGeoLow;
+  if (cached) return cached;
+  const high = quality === 'high';
+
+  const stalk = new THREE.CylinderGeometry(0.05, 0.07, 0.14, high ? 5 : 3, 1);
+  stalk.translate(0, -0.07, 0);
+  const body = high ? new THREE.SphereGeometry(0.24, 10, 8) : new THREE.IcosahedronGeometry(0.24, 0);
+  body.scale(1, 1.15, 1); // slightly pear-shaped
+  body.translate(0, -0.38, 0);
+  const merged = mergeGeometries([stalk, body], false)!;
+  stalk.dispose();
+  body.dispose();
+
+  if (high) figGeoHigh = merged;
+  else figGeoLow = merged;
+  return merged;
+}
+
+function getFigMaterial(): THREE.MeshStandardMaterial {
+  figMat ??= new THREE.MeshStandardMaterial({ roughness: 0.7, metalness: 0 });
+  return figMat;
+}
+
 // ---------- gnarled tube geometry ----------
 
 interface TubeOpts {
@@ -285,12 +356,15 @@ interface TubeOpts {
   phase: number;
 }
 
-/** Tube with per-vertex radius modulation (buttress lobes, gnarl bumps) and cylindrical UVs. */
+/**
+ * Tube with per-vertex radius modulation (buttress lobes, gnarl bumps), cylindrical UVs,
+ * and a domed end cap so no tube ever shows an open rim.
+ */
 function buildGnarledTube(nodes: TNode[], baseRadius: number, o: TubeOpts): THREE.BufferGeometry {
   const n = nodes.length;
   const cols = o.radial + 1; // +1: duplicated seam column for clean UV wrap
-  const positions = new Float32Array(n * cols * 3);
-  const uvs = new Float32Array(n * cols * 2);
+  const positions = new Float32Array((n * cols + 1) * 3); // +1: end-cap center vertex
+  const uvs = new Float32Array((n * cols + 1) * 2);
   const indices: number[] = [];
 
   const t = new THREE.Vector3();
@@ -347,6 +421,20 @@ function buildGnarledTube(nodes: TNode[], baseRadius: number, o: TubeOpts): THRE
     }
   }
 
+  // Domed end cap: a fan from the last ring to a center vertex pushed out along the
+  // tangent. computeVertexNormals() below smooths it into the side walls.
+  const endR = baseRadius * (o.tipFactor ?? 0.15);
+  const ci = n * cols;
+  positions[ci * 3] = nodes[n - 1].pos.x + t.x * endR * 0.7;
+  positions[ci * 3 + 1] = nodes[n - 1].pos.y + t.y * endR * 0.7;
+  positions[ci * 3 + 2] = nodes[n - 1].pos.z + t.z * endR * 0.7;
+  uvs[ci * 2] = 0.5;
+  uvs[ci * 2 + 1] = (arc + endR * 0.7) * o.uvScale;
+  for (let j = 0; j < o.radial; j++) {
+    const a = (n - 1) * cols + j;
+    indices.push(a, a + 1, ci);
+  }
+
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
@@ -373,6 +461,10 @@ export class TreePlant {
   private stems: StemRec[] = [];
   private clumps: Clump[] = [];
   private vines: Vine[] = [];
+  private figClusters: FigCluster[] = [];
+  private figCount = 0;
+  private ripeAnim = false;   // any fig spring currently moving
+  private figsRested = false;
   private restApplied = false;
   private physicsActive = false;
   private progress = 0;
@@ -399,7 +491,10 @@ export class TreePlant {
         s.mesh.userData.stemIndex = i;
         this.meshList!.push(s.mesh);
       });
-      for (const c of this.clumps) this.meshList.push(c.mesh); // stemIndex set in addClump
+      // Foliage counts via its solid proxy ellipsoid (rays slip between the sprig cards,
+      // and testing thousands of card triangles per pointer-move is wasted work anyway).
+      for (const c of this.clumps) this.meshList.push(c.proxy);
+      for (const fc of this.figClusters) this.meshList.push(fc.mesh); // stemIndex set in addFigs
     }
     return this.meshList;
   }
@@ -432,7 +527,67 @@ export class TreePlant {
       if (p >= this.total + GROW_WINDOW) this.done = true;
     }
 
+    // Ripening springs (underdamped → the figs pop as they swell).
+    if (this.ripeAnim) {
+      let any = false;
+      const step = Math.min(dt, 0.033);
+      for (const cluster of this.figClusters) {
+        for (const f of cluster.figs) {
+          const d = f.target - f.ripe;
+          if (Math.abs(d) < 1e-3 && Math.abs(f.vel) < 1e-3) {
+            f.ripe = f.target;
+            f.vel = 0;
+            continue;
+          }
+          f.vel += (d * 30 - f.vel * 5.5) * step;
+          f.ripe += f.vel * step;
+          if (f.ripe < 0) {
+            f.ripe = 0;
+            f.vel = 0;
+          }
+          any = true;
+        }
+      }
+      this.ripeAnim = any;
+      this.figsRested = false;
+    }
+
     this.updatePhysics(dt);
+  }
+
+  // ---------- fig ripening (the F brush) ----------
+
+  /** Ripen every green fig within `radius` of the world-space brush point. */
+  ripenAt(worldPoint: THREE.Vector3, radius: number): void {
+    for (const cluster of this.figClusters) {
+      // Compare in the twig's local space: one inverse transform per cluster.
+      _m.copy(cluster.mesh.matrixWorld).invert();
+      _v.copy(worldPoint).applyMatrix4(_m);
+      const worldScale = cluster.mesh.getWorldScale(_s).x || 1e-6;
+      const r2 = (radius / worldScale) ** 2;
+      for (const f of cluster.figs) {
+        if (f.target === 0 && f.birth <= this.progress && f.pos.distanceToSquared(_v) <= r2) {
+          f.target = 1;
+          this.ripeAnim = true;
+        }
+      }
+    }
+  }
+
+  ripenAll(): void {
+    for (const cluster of this.figClusters) {
+      for (const f of cluster.figs) {
+        if (f.birth <= this.progress) f.target = 1;
+      }
+    }
+    this.ripeAnim = true;
+  }
+
+  resetRipe(): void {
+    for (const cluster of this.figClusters) {
+      for (const f of cluster.figs) f.target = 0;
+    }
+    this.ripeAnim = true;
   }
 
   /** Damped rotational springs on every limb pivot — the push interaction's wobble. */
@@ -483,7 +638,7 @@ export class TreePlant {
   updateLeaves(t: number): void {
     const w = windSettings;
     const windy = w.strength > 0.001;
-    if (!windy && this.done && this.restApplied) return;
+    if (!windy && this.done && this.restApplied && !this.ripeAnim && this.figsRested) return;
 
     const speed = w.speed;
     const rad = THREE.MathUtils.degToRad(w.directionDeg);
@@ -518,6 +673,39 @@ export class TreePlant {
       clump.mesh.instanceMatrix.needsUpdate = true;
     }
 
+    // Figs: dangle-jiggle in wind; while ripening they swell (spring pop) and blush
+    // from green to orange-red via per-instance color.
+    if (this.figClusters.length > 0 && (windy || this.ripeAnim || !this.figsRested)) {
+      const tmpColor = new THREE.Color();
+      for (const cluster of this.figClusters) {
+        for (let i = 0; i < cluster.figs.length; i++) {
+          const f = cluster.figs[i];
+          let a = (this.progress - f.birth) / GROW_WINDOW;
+          if (a > 1) a = 1;
+          else if (a < 0) a = 0;
+          const appear = a * a * (3 - 2 * a);
+
+          _q.copy(f.quat);
+          if (windy && appear > 0.05) {
+            const jig = Math.sin(t * 3.1 * speed + f.phase) * w.strength * 0.12;
+            const jig2 = Math.sin(t * 4.3 * speed + f.phase * 1.7) * w.strength * 0.08;
+            _q.multiply(_qa.setFromAxisAngle(_X, jig)).multiply(_qb.setFromAxisAngle(_Y, jig2));
+          }
+
+          const ripe01 = THREE.MathUtils.clamp(f.ripe, 0, 1);
+          const sc = Math.max(f.scale * appear * (0.55 + 0.45 * f.ripe), 1e-4); // overshoot swells past full
+          _m.compose(f.pos, _q, _s.set(sc, sc, sc));
+          cluster.mesh.setMatrixAt(i, _m);
+
+          tmpColor.copy(FIG_GREEN).lerp(FIG_RIPE, ripe01).offsetHSL(f.hueJitter, 0, 0);
+          cluster.mesh.setColorAt(i, tmpColor);
+        }
+        cluster.mesh.instanceMatrix.needsUpdate = true;
+        if (cluster.mesh.instanceColor) cluster.mesh.instanceColor.needsUpdate = true;
+      }
+      this.figsRested = !windy && !this.ripeAnim && this.done;
+    }
+
     // Vines: rigid pendulums — lean downwind with the gust wave, oscillate on top.
     _axis.set(-dz, 0, dx);
     for (const v of this.vines) {
@@ -546,6 +734,7 @@ export class TreePlant {
     for (const st of this.stems) st.mesh.geometry.dispose();
     for (const v of this.vines) v.mesh.geometry.dispose();
     for (const c of this.clumps) c.mesh.dispose();
+    for (const fc of this.figClusters) fc.mesh.dispose();
     this.group.removeFromParent();
   }
 
@@ -585,6 +774,29 @@ export class TreePlant {
       uvScale: 1 / (Math.PI * 2 * s.trunkGirth),
       phase: rnd() * Math.PI * 2,
     }, bark, -1);
+
+    // --- leader: the trunk continues seamlessly into one thick, bent limb, so the top
+    // is a flowing curve into the crown instead of a dead-end. Its base starts one node
+    // INSIDE the trunk with the trunk's end thickness, so the joint is fully buried.
+    {
+      const inner = trunkNodes[trunkNodes.length - 2];
+      const leadDir = UP.clone()
+        .applyAxisAngle(anyPerpendicular(UP), 0.45 + rnd() * 0.5)
+        .applyAxisAngle(UP, rnd() * Math.PI * 2);
+      this.genLimb(
+        trunk.group,
+        inner.pos.clone(),
+        inner.pos.clone(),
+        leadDir,
+        s.limbLength * (0.9 + 0.4 * rnd()),
+        s.trunkGirth * 0.52,
+        0,
+        inner.birth,
+        radialLimb + 3,
+        bark,
+        rnd,
+      );
+    }
 
     // --- main limbs from the upper trunk, spiralling around it
     const nLimbs = Math.round(s.limbs);
@@ -697,7 +909,64 @@ export class TreePlant {
     } else {
       const tip = nodes[nodes.length - 1];
       this.addClump(rec.group, stemIndex, tip.pos, attachAbs.clone().add(tip.pos), tip.birth, rnd);
+      this.addFigs(rec.group, stemIndex, nodes, rnd);
     }
+  }
+
+  /**
+   * Figs grow at the leaf axils, so they cluster IN the foliage puff at the twig's end —
+   * scattered through the lower half of the clump ellipsoid, hanging out from under the
+   * leaves — never on the bare wood of the branches.
+   */
+  private addFigs(parentGroup: THREE.Group, stemIndex: number, nodes: TNode[], rnd: () => number): void {
+    const s = this.settings;
+    const count = Math.round(s.figDensity * (0.5 + rnd()));
+    if (count <= 0 || this.figCount >= MAX_FIGS) return;
+
+    const tip = nodes[nodes.length - 1];
+    const tmp = new THREE.Vector3();
+    const figs: Fig[] = [];
+    for (let i = 0; i < count && this.figCount < MAX_FIGS; i++) {
+      // A spot in the clump's lower shell: sideways-to-downward, never straight up.
+      const dir = randUnit(rnd, tmp).clone();
+      dir.y = -Math.abs(dir.y) * 0.7 - 0.15;
+      dir.normalize();
+      const r = s.clumpSize * (0.3 + 0.55 * rnd());
+      const pos = tip.pos.clone().add(new THREE.Vector3(
+        dir.x * r,
+        dir.y * r * 0.6 + s.clumpSize * 0.12, // start inside the puff, peek out below it
+        dir.z * r,
+      ));
+      const quat = new THREE.Quaternion().setFromAxisAngle(randUnit(rnd, tmp), rnd() * 0.35);
+      figs.push({
+        pos,
+        quat,
+        phase: rnd() * Math.PI * 2,
+        scale: s.figSize * (0.75 + 0.5 * rnd()),
+        birth: tip.birth + 0.2, // after the leaves around them have started showing
+        hueJitter: (rnd() - 0.5) * 0.04,
+        ripe: 0,
+        vel: 0,
+        target: 0,
+      });
+      this.figCount++;
+    }
+    if (figs.length === 0) return;
+
+    const mesh = new THREE.InstancedMesh(getFigGeometry(s.quality), getFigMaterial(), figs.length);
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.castShadow = true;
+    mesh.frustumCulled = false;
+    mesh.userData.stemIndex = stemIndex; // brushing a fig also lands on its twig's spring
+    const m = new THREE.Matrix4();
+    const sc = new THREE.Vector3();
+    figs.forEach((f, i) => {
+      m.compose(f.pos, f.quat, sc.set(1e-4, 1e-4, 1e-4)); // revealed by the pose pass
+      mesh.setMatrixAt(i, m);
+      mesh.setColorAt(i, FIG_GREEN);
+    });
+    parentGroup.add(mesh);
+    this.figClusters.push({ mesh, figs });
   }
 
   private addStem(
@@ -825,7 +1094,14 @@ export class TreePlant {
     });
     mesh.count = 0;
     parentGroup.add(mesh);
-    this.clumps.push({ mesh, cards, count: 0 });
+
+    const proxy = makeClumpProxy();
+    proxy.position.set(tipLocal.x, tipLocal.y + lift, tipLocal.z);
+    proxy.scale.set(rx * 1.25, ry * 1.4, rx * 1.25); // margin so protruding sprigs still count
+    proxy.userData.stemIndex = stemIndex;
+    parentGroup.add(proxy);
+
+    this.clumps.push({ mesh, cards, count: 0, proxy });
   }
 
   private spawnVines(rnd: () => number): void {

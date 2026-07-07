@@ -82,6 +82,15 @@ export function buildGui(app: App): GUI {
   fVines.add(t, 'vineLength', 0.2, 2).name('Length').onChange(live);
   treeFolders.push(fVines);
 
+  // A banyan is a ficus — its flowers ARE the figs. F-brush the twigs to ripen them.
+  const fFigs = gui.addFolder('Figs (F to brush)');
+  fFigs.add(t, 'figDensity', 0, 8, 1).name('Figs per twig').onChange(live);
+  fFigs.add(t, 'figSize', 0.02, 0.12).name('Size').onChange(live);
+  fFigs.add(s, 'flowerBrush', 0.08, 0.6).name('Brush radius');
+  fFigs.add({ ripen: () => app.ripenAll() }, 'ripen').name('🍈 Ripen all');
+  fFigs.add({ reset: () => app.resetRipe() }, 'reset').name('Reset figs');
+  treeFolders.push(fFigs);
+
   // Read at pointer-time — no regrow, acts immediately on the next push.
   const fInteract = gui.addFolder('Interaction (live)');
   fInteract.add(s, 'pushForce', 0.1, 4).name('Push force');
