@@ -59,7 +59,9 @@ export class App {
   private lastPY = 0;
   private branchRay = new THREE.Raycaster();
   private strokeCounter = 0;
-  private regrowPending: 'instant' | 'animate' | null = null;
+  private regrowPending: { mode: 'instant' | 'animate'; ivy: boolean; tree: boolean } | null = null;
+  private lastRegrowAt = 0; // performance.now() of the last rebuild
+  private regrowCost = 0;   // how long that rebuild took (ms) — drives the throttle
 
   constructor(private container: HTMLElement) {}
 
@@ -81,6 +83,9 @@ export class App {
     this.controls.dampingFactor = 0.08;
     this.controls.minDistance = 1.2;
     this.controls.maxDistance = 12;
+    // Keep the camera above the horizon of the orbit target (which sits above the ground
+    // disc), so you can't tumble under the floor and look up through it.
+    this.controls.maxPolarAngle = Math.PI / 2 - 0.02;
 
     this.setupLights();
     this.scene.add(this.modelRoot, this.ivyRoot);
@@ -179,6 +184,28 @@ export class App {
 
   resetRipe(): void {
     this.tree?.resetRipe();
+  }
+
+  // ---------- cheap live slider paths (in-place instance updates, no regeneration) ----------
+
+  setIvyLeafSize(v: number): void {
+    for (const p of this.plants) p.setLeafSize(v);
+  }
+
+  setIvyFlowerSize(v: number): void {
+    for (const p of this.plants) p.setFlowerSize(v);
+  }
+
+  setTreeLeafSize(v: number): void {
+    this.tree?.setLeafSize(v);
+  }
+
+  setTreeLeafHue(v: number): void {
+    this.tree?.setLeafHue(v);
+  }
+
+  setTreeFigSize(v: number): void {
+    this.tree?.setFigSize(v);
   }
 
   // ---------- ivy flower brush (F) ----------
@@ -284,13 +311,17 @@ export class App {
   }
 
   /**
-   * Ask for a rebuild of every plant. Calls are coalesced to one per frame (slider drags
-   * fire onChange rapidly). 'instant' snaps to fully grown — used for live edits so you see
-   * the result immediately; 'animate' replays the grow animation — used to preview speed.
+   * Ask for a rebuild. Requests are coalesced and throttled in the tick (slider drags fire
+   * onChange dozens of times a second — rebuilding the world per event is what makes drags
+   * lag). `scope` limits the work to the plant type whose sliders actually moved.
+   * 'instant' snaps to fully grown; 'animate' replays the growth.
    */
-  scheduleRegrow(mode: 'instant' | 'animate'): void {
-    // An animate request always wins over a pending instant one within the same frame.
-    if (mode === 'animate' || this.regrowPending === null) this.regrowPending = mode;
+  scheduleRegrow(mode: 'instant' | 'animate', scope: 'ivy' | 'tree' | 'both' = 'both'): void {
+    const p = this.regrowPending ?? { mode, ivy: false, tree: false };
+    if (mode === 'animate') p.mode = 'animate'; // an animate request always wins
+    if (scope !== 'tree') p.ivy = true;
+    if (scope !== 'ivy') p.tree = true;
+    this.regrowPending = p;
   }
 
   /** New random global seed, applied live. */
@@ -312,11 +343,10 @@ export class App {
     this.regrowPending = null;
   }
 
-  private regrowAll(animate: boolean): void {
+  private regrowIvy(animate: boolean): void {
     for (const p of this.plants) p.dispose();
     this.plants = [];
     for (const stroke of this.strokes) this.growPlant(stroke, animate);
-    if (this.tree) this.rebuildTree(animate);
   }
 
   private growPlant(stroke: Stroke, animate: boolean): void {
@@ -530,9 +560,23 @@ export class App {
     const dt = Math.min((time - this.lastTime) / 1000, 0.05);
     this.lastTime = time;
     if (this.regrowPending) {
-      const animate = this.regrowPending === 'animate';
-      this.regrowPending = null;
-      this.regrowAll(animate);
+      // Adaptive throttle: the heavier the last rebuild, the longer we wait before the
+      // next one, so slider drags stay smooth whatever the scene costs. The final
+      // pending request always runs, so releasing the slider lands on the exact value.
+      const now = performance.now();
+      const interval = this.regrowPending.mode === 'animate'
+        ? 0
+        : THREE.MathUtils.clamp(this.regrowCost * 3, 60, 400);
+      if (now - this.lastRegrowAt >= interval) {
+        const req = this.regrowPending;
+        this.regrowPending = null;
+        const animate = req.mode === 'animate';
+        const t0 = performance.now();
+        if (req.ivy) this.regrowIvy(animate);
+        if (req.tree && this.tree) this.rebuildTree(animate);
+        this.regrowCost = performance.now() - t0;
+        this.lastRegrowAt = performance.now();
+      }
     }
 
     this.controls.update();

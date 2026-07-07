@@ -440,6 +440,26 @@ export class IvyPlant {
     this.bloomAnim = true;
   }
 
+  // ---------- cheap live paths (rescale in place — no regeneration) ----------
+
+  /** Rescale every leaf instance to a new leaf size without rebuilding the plant. */
+  setLeafSize(v: number): void {
+    const r = v / this.settings.leafSize;
+    if (!Number.isFinite(r) || r <= 0 || r === 1) return;
+    this.settings.leafSize = v;
+    for (const leaf of this.leaves) leaf.scale *= r;
+    this.restApplied = false; // repose on the next frame
+  }
+
+  /** Rescale every flower/bud instance without rebuilding the plant. */
+  setFlowerSize(v: number): void {
+    const r = v / this.settings.flowerSize;
+    if (!Number.isFinite(r) || r <= 0 || r === 1) return;
+    this.settings.flowerSize = v;
+    for (const f of this.flowers) f.scale *= r;
+    this.flowersRested = false;
+  }
+
   /** Jump straight to the fully-grown state (used when tweaking settings live). */
   finishGrowth(): void {
     this.progress = this.total + LEAF_GROW_WINDOW + 1;

@@ -7,7 +7,10 @@ export function buildGui(app: App): GUI {
   const s = app.settings;
 
   // Live edits snap every existing plant to fully grown so you see the change immediately.
-  const live = () => app.scheduleRegrow('instant');
+  // Scoped so dragging an ivy slider never rebuilds the tree (and vice versa).
+  const liveIvy = () => app.scheduleRegrow('instant', 'ivy');
+  const liveTree = () => app.scheduleRegrow('instant', 'tree');
+  const liveBoth = () => app.scheduleRegrow('instant', 'both');
 
   const ivyFolders: GUI[] = [];
   const treeFolders: GUI[] = [];
@@ -34,22 +37,23 @@ export function buildGui(app: App): GUI {
   ivyFolders.push(fDraw);
 
   const fShape = gui.addFolder('Ivy shape (live)');
-  fShape.add(s, 'stemRadius', 0.003, 0.03).name('Stem radius').onChange(live);
-  fShape.add(s, 'branchDensity', 0, 14, 1).name('Branches / unit').onChange(live);
-  fShape.add(s, 'branchLength', 0.1, 1.5).name('Branch length').onChange(live);
-  fShape.add(s, 'wander', 0, 1).name('Wildness').onChange(live);
-  fShape.add(s, 'extend', 0, 3).name('Overgrow past stroke').onChange(live);
+  fShape.add(s, 'stemRadius', 0.003, 0.03).name('Stem radius').onChange(liveIvy);
+  fShape.add(s, 'branchDensity', 0, 14, 1).name('Branches / unit').onChange(liveIvy);
+  fShape.add(s, 'branchLength', 0.1, 1.5).name('Branch length').onChange(liveIvy);
+  fShape.add(s, 'wander', 0, 1).name('Wildness').onChange(liveIvy);
+  fShape.add(s, 'extend', 0, 3).name('Overgrow past stroke').onChange(liveIvy);
   ivyFolders.push(fShape);
 
   const fIvyLeaves = gui.addFolder('Ivy leaves (live)');
-  fIvyLeaves.add(s, 'leafDensity', 0, 30).name('Density').onChange(live);
-  fIvyLeaves.add(s, 'leafSize', 0.03, 0.25).name('Size').onChange(live);
+  fIvyLeaves.add(s, 'leafDensity', 0, 30).name('Density').onChange(liveIvy);
+  // Size is a pure rescale of existing instances — instant, no regrow.
+  fIvyLeaves.add(s, 'leafSize', 0.03, 0.25).name('Size').onChange((v: number) => app.setIvyLeafSize(v));
   ivyFolders.push(fIvyLeaves);
 
   // Flower sites regrow live; blooming itself happens with the F brush (hover the ivy).
   const fFlowers = gui.addFolder('Flowers (F to brush)');
-  fFlowers.add(s, 'flowerDensity', 0, 8).name('Bud sites / unit').onChange(live);
-  fFlowers.add(s, 'flowerSize', 0.05, 0.3).name('Size').onChange(live);
+  fFlowers.add(s, 'flowerDensity', 0, 8).name('Bud sites / unit').onChange(liveIvy);
+  fFlowers.add(s, 'flowerSize', 0.05, 0.3).name('Size').onChange((v: number) => app.setIvyFlowerSize(v));
   fFlowers.add(s, 'flowerBrush', 0.08, 0.6).name('Brush radius');
   fFlowers.add({ bloom: () => app.bloomAll() }, 'bloom').name('🌼 Bloom all');
   fFlowers.add({ reset: () => app.resetBlooms() }, 'reset').name('Reset blooms');
@@ -60,32 +64,33 @@ export function buildGui(app: App): GUI {
   const t = app.treeParams;
 
   const fTrunk = gui.addFolder('Trunk & limbs (live)');
-  fTrunk.add(t, 'trunkHeight', 0.4, 2).name('Trunk height').onChange(live);
-  fTrunk.add(t, 'trunkGirth', 0.08, 0.4).name('Trunk girth').onChange(live);
-  fTrunk.add(t, 'buttress', 0, 1).name('Buttress roots').onChange(live);
-  fTrunk.add(t, 'limbs', 2, 8, 1).name('Main limbs').onChange(live);
-  fTrunk.add(t, 'limbLength', 0.6, 2.4).name('Limb length').onChange(live);
-  fTrunk.add(t, 'spread', 0, 1).name('Crown spread').onChange(live);
-  fTrunk.add(t, 'gnarl', 0, 1).name('Gnarl').onChange(live);
-  fTrunk.add(t, 'splits', 1, 3, 1).name('Fork generations').onChange(live);
+  fTrunk.add(t, 'trunkHeight', 0.4, 2).name('Trunk height').onChange(liveTree);
+  fTrunk.add(t, 'trunkGirth', 0.08, 0.4).name('Trunk girth').onChange(liveTree);
+  fTrunk.add(t, 'buttress', 0, 1).name('Buttress roots').onChange(liveTree);
+  fTrunk.add(t, 'limbs', 2, 8, 1).name('Main limbs').onChange(liveTree);
+  fTrunk.add(t, 'limbLength', 0.6, 2.4).name('Limb length').onChange(liveTree);
+  fTrunk.add(t, 'spread', 0, 1).name('Crown spread').onChange(liveTree);
+  fTrunk.add(t, 'gnarl', 0, 1).name('Gnarl').onChange(liveTree);
+  fTrunk.add(t, 'splits', 1, 3, 1).name('Fork generations').onChange(liveTree);
   treeFolders.push(fTrunk);
 
   const fCanopy = gui.addFolder('Canopy (live)');
-  fCanopy.add(t, 'clumpSize', 0.15, 0.8).name('Clump size').onChange(live);
-  fCanopy.add(t, 'clumpDensity', 0, 140, 1).name('Sprigs per clump').onChange(live);
-  fCanopy.add(t, 'leafSize', 0.06, 0.35).name('Sprig size').onChange(live);
-  fCanopy.add(t, 'leafHue', 0.05, 0.35).name('Hue (autumn ↔ green)').onChange(live);
+  fCanopy.add(t, 'clumpSize', 0.15, 0.8).name('Clump size').onChange(liveTree);
+  fCanopy.add(t, 'clumpDensity', 0, 140, 1).name('Sprigs per clump').onChange(liveTree);
+  // Size and hue update existing instances in place — instant, no regrow.
+  fCanopy.add(t, 'leafSize', 0.06, 0.35).name('Sprig size').onChange((v: number) => app.setTreeLeafSize(v));
+  fCanopy.add(t, 'leafHue', 0.05, 0.35).name('Hue (autumn ↔ green)').onChange((v: number) => app.setTreeLeafHue(v));
   treeFolders.push(fCanopy);
 
   const fVines = gui.addFolder('Hanging vines (live)');
-  fVines.add(t, 'vineCount', 0, 60, 1).name('Count').onChange(live);
-  fVines.add(t, 'vineLength', 0.2, 2).name('Length').onChange(live);
+  fVines.add(t, 'vineCount', 0, 60, 1).name('Count').onChange(liveTree);
+  fVines.add(t, 'vineLength', 0.2, 2).name('Length').onChange(liveTree);
   treeFolders.push(fVines);
 
   // A banyan is a ficus — its flowers ARE the figs. F-brush the twigs to ripen them.
   const fFigs = gui.addFolder('Figs (F to brush)');
-  fFigs.add(t, 'figDensity', 0, 8, 1).name('Figs per twig').onChange(live);
-  fFigs.add(t, 'figSize', 0.02, 0.12).name('Size').onChange(live);
+  fFigs.add(t, 'figDensity', 0, 8, 1).name('Figs per twig').onChange(liveTree);
+  fFigs.add(t, 'figSize', 0.02, 0.12).name('Size').onChange((v: number) => app.setTreeFigSize(v));
   fFigs.add(s, 'flowerBrush', 0.08, 0.6).name('Brush radius');
   fFigs.add({ ripen: () => app.ripenAll() }, 'ripen').name('🍈 Ripen all');
   fFigs.add({ reset: () => app.resetRipe() }, 'reset').name('Reset figs');
@@ -108,8 +113,8 @@ export function buildGui(app: App): GUI {
   fLook
     .add(s, 'quality', { 'Low poly': 'low', 'Realistic (high poly)': 'high' })
     .name('Style')
-    .onChange(live);
-  fLook.add(s, 'seed', 0, 999, 1).name('Seed').listen().onChange(live);
+    .onChange(liveBoth);
+  fLook.add(s, 'seed', 0, 999, 1).name('Seed').listen().onChange(liveBoth);
   fLook.add({ random: () => app.randomizeSeed() }, 'random').name('🎲 Random seed');
 
   // Growth speed only shows when the plant animates, so it is NOT live — press Redraw to preview it.

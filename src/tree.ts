@@ -724,6 +724,44 @@ export class TreePlant {
     this.restApplied = !windy && this.done;
   }
 
+  // ---------- cheap live paths (rescale/recolor in place — no regeneration) ----------
+
+  /** Rescale every canopy sprig card without rebuilding the tree. */
+  setLeafSize(v: number): void {
+    const r = v / this.settings.leafSize;
+    if (!Number.isFinite(r) || r <= 0 || r === 1) return;
+    this.settings.leafSize = v;
+    for (const c of this.clumps) {
+      for (const card of c.cards) card.scale *= r;
+    }
+    this.restApplied = false; // repose on the next frame
+  }
+
+  /** Shift the foliage hue in place — the per-card lightness/saturation variation survives. */
+  setLeafHue(v: number): void {
+    const d = v - this.settings.leafHue;
+    if (!Number.isFinite(d) || d === 0) return;
+    this.settings.leafHue = v;
+    for (const c of this.clumps) {
+      c.cards.forEach((card, i) => {
+        card.color.offsetHSL(d, 0, 0);
+        c.mesh.setColorAt(i, card.color);
+      });
+      if (c.mesh.instanceColor) c.mesh.instanceColor.needsUpdate = true;
+    }
+  }
+
+  /** Rescale every fig without rebuilding the tree. */
+  setFigSize(v: number): void {
+    const r = v / this.settings.figSize;
+    if (!Number.isFinite(r) || r <= 0 || r === 1) return;
+    this.settings.figSize = v;
+    for (const fc of this.figClusters) {
+      for (const f of fc.figs) f.scale *= r;
+    }
+    this.figsRested = false;
+  }
+
   finishGrowth(): void {
     this.progress = this.total + GROW_WINDOW + 1;
     this.done = false;
