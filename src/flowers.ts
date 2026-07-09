@@ -22,6 +22,19 @@ function hash(i: number, k: number): number {
   return x - Math.floor(x);
 }
 
+/**
+ * Merge template parts whatever their indexing: cylinders/spheres are indexed but the
+ * low-poly icosahedron buds are not, and mergeGeometries refuses to mix the two —
+ * so flatten every part to non-indexed first. Disposes the parts.
+ */
+function mergeParts(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
+  const flat = parts.map((p) => (p.index ? p.toNonIndexed() : p));
+  const merged = mergeGeometries(flat, false)!;
+  for (const p of flat) p.dispose();
+  for (const p of parts) p.dispose();
+  return merged;
+}
+
 function colorize(geo: THREE.BufferGeometry, color: THREE.Color): THREE.BufferGeometry {
   const n = geo.attributes.position.count;
   const arr = new Float32Array(n * 3);
@@ -81,9 +94,7 @@ function buildUmbel(quality: Quality): THREE.BufferGeometry {
     parts.push(colorize(bud, tmpColor));
   }
 
-  const merged = mergeGeometries(parts, false)!;
-  for (const p of parts) p.dispose();
-  return merged;
+  return mergeParts(parts);
 }
 
 /**
@@ -123,9 +134,7 @@ function buildBudBall(quality: Quality): THREE.BufferGeometry {
     parts.push(colorize(bud, tmpColor));
   }
 
-  const merged = mergeGeometries(parts, false)!;
-  for (const p of parts) p.dispose();
-  return merged;
+  return mergeParts(parts);
 }
 
 export function getUmbelGeometry(quality: Quality): THREE.BufferGeometry {

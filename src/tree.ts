@@ -330,9 +330,15 @@ function getFigGeometry(quality: Quality): THREE.BufferGeometry {
   const body = high ? new THREE.SphereGeometry(0.24, 10, 8) : new THREE.IcosahedronGeometry(0.24, 0);
   body.scale(1, 1.15, 1); // slightly pear-shaped
   body.translate(0, -0.38, 0);
-  const merged = mergeGeometries([stalk, body], false)!;
+  // The low-poly icosahedron body is non-indexed while the stalk cylinder is indexed,
+  // and mergeGeometries refuses to mix the two — flatten both before merging.
+  const stalkFlat = stalk.toNonIndexed();
+  const bodyFlat = body.index ? body.toNonIndexed() : body;
+  const merged = mergeGeometries([stalkFlat, bodyFlat], false)!;
   stalk.dispose();
+  stalkFlat.dispose();
   body.dispose();
+  bodyFlat.dispose();
 
   if (high) figGeoHigh = merged;
   else figGeoLow = merged;
